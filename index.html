@@ -1,0 +1,263 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Eraser: SHREDDER</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Malgun Gothic', 'Apple SD Gothic Neo', sans-serif;
+      background: #111;
+      color: #eee;
+      min-height: 100vh;
+      padding: 32px 24px 60px;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 36px;
+    }
+    header h1 { font-size: 22px; letter-spacing: 1px; }
+    header p  { color: #888; font-size: 13px; margin-top: 6px; }
+
+    .upload-area {
+      border: 2px dashed #444;
+      border-radius: 10px;
+      padding: 40px 20px;
+      text-align: center;
+      cursor: pointer;
+      transition: border-color 0.2s, background 0.2s;
+      max-width: 480px;
+      margin: 0 auto 24px;
+    }
+    .upload-area:hover, .upload-area.drag { border-color: #888; background: #1a1a1a; }
+    .upload-area img {
+      max-height: 200px;
+      max-width: 100%;
+      border-radius: 6px;
+      display: none;
+    }
+    .upload-area .hint { color: #666; font-size: 13px; }
+
+    .controls {
+      max-width: 480px;
+      margin: 0 auto 28px;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    button#run {
+      width: 100%;
+      padding: 13px;
+      background: #fff;
+      color: #111;
+      border: none;
+      border-radius: 8px;
+      font-size: 15px;
+      font-weight: bold;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+    button#run:hover:not(:disabled) { background: #ddd; }
+    button#run:disabled { background: #333; color: #666; cursor: not-allowed; }
+
+    #status {
+      max-width: 480px;
+      margin: 0 auto 28px;
+      background: #1a1a1a;
+      border-radius: 8px;
+      padding: 14px 16px;
+      font-size: 13px;
+      color: #aaa;
+      white-space: pre-wrap;
+      min-height: 48px;
+      line-height: 1.7;
+      display: none;
+    }
+    #status.visible { display: block; }
+
+    .results {
+      display: flex;
+      gap: 16px;
+      max-width: 1400px;
+      margin: 0 auto;
+    }
+    .panel {
+      flex: 1;
+      background: #1a1a1a;
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .panel-title {
+      padding: 10px 14px;
+      font-size: 12px;
+      color: #666;
+      border-bottom: 1px solid #222;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+    .panel img, .panel canvas {
+      width: 100%;
+      display: block;
+    }
+    .panel .empty {
+      height: 320px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #444;
+      font-size: 13px;
+    }
+
+    @media (max-width: 640px) {
+      .results { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>🔒 Eraser: SHREDDER</h1>
+  <p>홍채 생체정보 자동 탐지 및 변조 — Powered by MediaPipe FaceLandmarker</p>
+</header>
+
+<div class="upload-area" id="dropZone">
+  <img id="preview" alt="preview">
+  <div class="hint" id="hint">클릭하거나 이미지를 드래그하세요</div>
+  <input type="file" id="fileInput" accept="image/*" style="display:none">
+</div>
+
+<div class="controls">
+  <button id="run" disabled>🔒 Eraser 실행</button>
+</div>
+
+<div id="status"></div>
+
+<div class="results">
+  <div class="panel">
+    <div class="panel-title">원본</div>
+    <div class="empty" id="emptyO">업로드한 사진이 여기 표시됩니다</div>
+    <img id="originalImg" style="display:none" alt="original">
+  </div>
+  <div class="panel">
+    <div class="panel-title">탐지 마커</div>
+    <div class="empty" id="emptyL">처리 결과가 여기 표시됩니다</div>
+    <img id="markedImg" style="display:none" alt="marked">
+  </div>
+  <div class="panel">
+    <div class="panel-title">변조 결과</div>
+    <div class="empty" id="emptyR">처리 결과가 여기 표시됩니다</div>
+    <canvas id="resultCanvas" style="display:none"></canvas>
+  </div>
+</div>
+
+<script>
+  const dropZone   = document.getElementById('dropZone');
+  const fileInput  = document.getElementById('fileInput');
+  const preview    = document.getElementById('preview');
+  const hint       = document.getElementById('hint');
+  const runBtn     = document.getElementById('run');
+  const statusBox  = document.getElementById('status');
+  const markedImg  = document.getElementById('markedImg');
+  const canvas     = document.getElementById('resultCanvas');
+  const ctx        = canvas.getContext('2d');
+
+  let originalImgEl = new Image();
+  let maskedImgEl   = new Image();
+  let maskedLoaded  = false;
+  let selectedFile  = null;
+
+  // ── Upload ──────────────────────────────────────────────────
+  dropZone.addEventListener('click', () => fileInput.click());
+  fileInput.addEventListener('change', e => loadFile(e.target.files[0]));
+
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('drag'); });
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('drag'));
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault();
+    dropZone.classList.remove('drag');
+    loadFile(e.dataTransfer.files[0]);
+  });
+
+  function loadFile(file) {
+    if (!file) return;
+    selectedFile = file;
+    const url = URL.createObjectURL(file);
+    preview.src = url;
+    preview.style.display = 'block';
+    hint.style.display = 'none';
+    originalImgEl.src = url;
+    // 원본 패널에 바로 표시
+    const origPanel = document.getElementById('originalImg');
+    origPanel.src = url;
+    origPanel.style.display = 'block';
+    document.getElementById('emptyO').style.display = 'none';
+    runBtn.disabled = false;
+    maskedLoaded = false;
+  }
+
+  function blend() {
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    ctx.drawImage(maskedImgEl, 0, 0, canvas.width, canvas.height);
+  }
+
+  // ── Run ─────────────────────────────────────────────────────
+  runBtn.addEventListener('click', async () => {
+    if (!selectedFile) return;
+
+    runBtn.disabled = true;
+    runBtn.textContent = '처리 중...';
+    setStatus('⏳ MediaPipe로 홍채 탐지 중...');
+
+    const form = new FormData();
+    form.append('file', selectedFile);
+
+    try {
+      const res  = await fetch('/process', { method: 'POST', body: form });
+      const data = await res.json();
+
+      if (data.status !== 'ok') {
+        setStatus(`❌ ${data.reason || '처리 실패'}`);
+        return;
+      }
+
+      // 탐지 마커 이미지
+      markedImg.src = 'data:image/jpeg;base64,' + data.marked;
+      markedImg.style.display = 'block';
+      document.getElementById('emptyL').style.display = 'none';
+
+      // 변조 결과 캔버스
+      maskedImgEl = new Image();
+      maskedImgEl.onload = () => {
+        canvas.width  = maskedImgEl.naturalWidth;
+        canvas.height = maskedImgEl.naturalHeight;
+        maskedLoaded  = true;
+        blend();
+        canvas.style.display = 'block';
+        document.getElementById('emptyR').style.display = 'none';
+      };
+      maskedImgEl.src = 'data:image/jpeg;base64,' + data.masked;
+
+      const wmLine = data.watermark_id
+        ? `\n🔑 워터마크 ID: ${data.watermark_id}`
+        : '';
+      setStatus(data.log.join('\n') + wmLine);
+    } catch (e) {
+      setStatus(`❌ 서버 오류: ${e.message}`);
+    } finally {
+      runBtn.disabled = false;
+      runBtn.textContent = '🔒 Eraser 실행';
+    }
+  });
+
+  function setStatus(msg) {
+    statusBox.textContent = msg;
+    statusBox.classList.add('visible');
+  }
+</script>
+
+</body>
+</html>
